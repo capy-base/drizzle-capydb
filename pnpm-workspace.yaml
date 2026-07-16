@@ -1,0 +1,5 @@
+# Bleeding-edge policy: we intentionally consume fresh releases (typescript
+# native previews, oxc tooling, same-day @capydb packages), so pnpm's
+# minimum-release-age supply-chain gate is disabled here like in the other
+# CapyDB JS repos (frontend, mcp-server).
+minimumReleaseAge: 0

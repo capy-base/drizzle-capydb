@@ -1,0 +1,70 @@
+{
+  "name": "@capydb/drizzle",
+  "version": "1.0.0",
+  "description": "Official Drizzle ORM helpers for CapyDB - pooled-aware postgres-js clients with safe transaction-pooler defaults.",
+  "keywords": [
+    "capydb",
+    "postgres",
+    "database",
+    "drizzle",
+    "drizzle-orm",
+    "postgres-js",
+    "pgbouncer",
+    "serverless"
+  ],
+  "homepage": "https://capydb.dev",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/capy-base/capydb-drizzle"
+  },
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    }
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsdown && tsc -p tsconfig.build.json && cp dist/index.d.ts dist/index.d.cts",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint src test",
+    "format": "oxfmt --write src test",
+    "test": "vitest run",
+    "prepublishOnly": "pnpm typecheck && pnpm build"
+  },
+  "peerDependencies": {
+    "drizzle-orm": ">=1.0.0-rc.1 <2",
+    "postgres": ">=3.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "drizzle-orm": "1.0.0-rc.4",
+    "oxfmt": "0.59.0",
+    "oxlint": "1.74.0",
+    "postgres": "^3.4.9",
+    "tsdown": "^0.22.9",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  },
+  "packageManager": "pnpm@11.13.1",
+  "engines": {
+    "node": ">=24"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
