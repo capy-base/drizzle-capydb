@@ -111,7 +111,8 @@ result mappers (mapping compiled once per query shape).
 
 Use `createDirectDb()` (resolution order: `options.connectionString`,
 `CAPYDB_DATABASE_DIRECT_URL`, `DATABASE_DIRECT_URL`) for programmatic
-migrations:
+migrations. It rejects a pooled `:6432` URL (or `pooled: true`) before opening
+a client, because client flags cannot make transaction-pooled DDL safe:
 
 ```ts
 // scripts/migrate.ts
@@ -133,6 +134,9 @@ export default defineConfig({
   dialect: 'postgresql',
   schema: './src/db/schema.ts',
   out: './drizzle',
+  // drizzle-kit v1 manages ALL schemas by default; scope push/pull to yours
+  // so extension-created schemas (e.g. cron from pg_cron) are never touched.
+  schemaFilter: ['public'],
   dbCredentials: {
     // Never the pooled DATABASE_URL: transaction pooling breaks the advisory
     // locks and session state migration tooling depends on.

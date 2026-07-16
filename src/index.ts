@@ -178,8 +178,16 @@ export function resolveClientOptions(
 function createFromSources<TRelations extends AnyRelations>(
   options: CapyDBDrizzleOptions<TRelations>,
   envVarNames: readonly string[],
+  requireDirect = false,
 ): PostgresJsDatabase<TRelations> & { $client: Sql } {
   const connectionString = resolveConnectionString(options.connectionString, envVarNames);
+  if (requireDirect && (options.pooled === true || isPooledUrl(connectionString))) {
+    throw new Error(
+      "@capydb/drizzle: createDirectDb requires a direct Postgres connection, but the " +
+        "resolved URL targets the pooled endpoint. Set CAPYDB_DATABASE_DIRECT_URL or " +
+        "DATABASE_DIRECT_URL to the :5432 connection before running migrations or DDL.",
+    );
+  }
   const client = postgres(
     connectionString,
     resolveClientOptions(connectionString, options.pooled, options.client),
@@ -256,9 +264,9 @@ export function createDb<TRelations extends AnyRelations = EmptyRelations>(
  * direct connection; this function makes the safe path the easy path.
  *
  * Defaults to direct-connection settings (`{ max: 10 }`, prepared statements
- * enabled). If the resolved URL somehow points at `:6432` anyway, pooled
- * defaults kick in as a safety net - but fix the env var: migrations against
- * the pooler can deadlock or half-apply.
+ * enabled). If the resolved URL points at `:6432` (or `pooled: true` is set),
+ * this function throws before constructing a client: changing postgres-js
+ * options cannot make transaction-pooled migrations safe.
  *
  * @example
  * ```ts
@@ -274,5 +282,5 @@ export function createDb<TRelations extends AnyRelations = EmptyRelations>(
 export function createDirectDb<TRelations extends AnyRelations = EmptyRelations>(
   options: CapyDBDrizzleOptions<TRelations> = {},
 ): PostgresJsDatabase<TRelations> & { $client: Sql } {
-  return createFromSources(options, DIRECT_ENV_VARS);
+  return createFromSources(options, DIRECT_ENV_VARS, true);
 }

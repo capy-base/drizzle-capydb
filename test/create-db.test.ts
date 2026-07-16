@@ -87,9 +87,16 @@ describe("createDirectDb", () => {
     expect(() => createDirectDb()).toThrowError(/CAPYDB_DATABASE_DIRECT_URL, DATABASE_DIRECT_URL/);
   });
 
-  it("applies pooled safety-net defaults if the direct env var points at :6432", () => {
+  it("rejects a pooled URL before constructing a migration client", () => {
     vi.stubEnv("DATABASE_DIRECT_URL", POOLED_URL);
-    createDirectDb();
-    expect(postgresMock).toHaveBeenCalledExactlyOnceWith(POOLED_URL, { prepare: false, max: 1 });
+    expect(() => createDirectDb()).toThrowError(/requires a direct Postgres connection/);
+    expect(postgresMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects an explicitly pooled portless URL", () => {
+    expect(() =>
+      createDirectDb({ connectionString: "postgresql://app@host/app", pooled: true }),
+    ).toThrowError(/requires a direct Postgres connection/);
+    expect(postgresMock).not.toHaveBeenCalled();
   });
 });
