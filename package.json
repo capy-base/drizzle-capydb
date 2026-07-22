@@ -1,6 +1,6 @@
 {
   "name": "@capydb/drizzle",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Official Drizzle ORM helpers for CapyDB - pooled-aware postgres-js clients with safe transaction-pooler defaults.",
   "keywords": [
     "capydb",
@@ -48,19 +48,19 @@
   },
   "peerDependencies": {
     "drizzle-orm": ">=1.0.0-rc.1 <2",
-    "postgres": ">=3.4.0"
+    "postgres": ">=3.4.9"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",
     "drizzle-orm": "1.0.0-rc.4",
-    "oxfmt": "0.59.0",
-    "oxlint": "1.74.0",
+    "oxfmt": "0.60.0",
+    "oxlint": "1.75.0",
     "postgres": "^3.4.9",
-    "tsdown": "^0.22.9",
+    "tsdown": "^0.22.13",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10"
   },
-  "packageManager": "pnpm@11.13.1",
+  "packageManager": "pnpm@11.15.1",
   "engines": {
     "node": ">=24"
   },

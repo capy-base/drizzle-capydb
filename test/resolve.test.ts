@@ -1,5 +1,10 @@
-import { describe, expect, it } from "vitest";
-import { isPooledUrl, resolveClientOptions, resolveConnectionString } from "../src/index";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  assertPooledStartupParameters,
+  isPooledUrl,
+  resolveClientOptions,
+  resolveConnectionString,
+} from "../src/index";
 
 const POOLED_URL = "postgresql://app:secret@proj.db.capydb.dev:6432/appdb?sslmode=require";
 const DIRECT_URL = "postgresql://app:secret@proj.db.capydb.dev:5432/appdb?sslmode=require";
@@ -97,5 +102,60 @@ describe("resolveClientOptions", () => {
       prepare: true,
       max: 1,
     });
+  });
+});
+
+describe("pooled startup parameter guard", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("passes tracked params (application_name etc.) through silently", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(() =>
+      resolveClientOptions(POOLED_URL, undefined, {
+        connection: { application_name: "ermis", client_encoding: "utf8" },
+      }),
+    ).not.toThrow();
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("warns that pooler-ignored params like statement_timeout are not applied", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    resolveClientOptions(POOLED_URL, undefined, {
+      connection: { statement_timeout: 10_000 },
+    });
+    expect(warn).toHaveBeenCalledOnce();
+    expect(warn.mock.calls[0]?.[0]).toContain("statement_timeout");
+    expect(warn.mock.calls[0]?.[0]).toContain("ALTER ROLE");
+  });
+
+  it("throws for params the pooler rejects at handshake (search_path)", () => {
+    expect(() =>
+      resolveClientOptions(POOLED_URL, undefined, {
+        connection: { search_path: "tenant_42" },
+      }),
+    ).toThrow(/search_path.*unsupported startup parameter/s);
+  });
+
+  it("skips undefined/null values and does not guard direct clients", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(() =>
+      resolveClientOptions(POOLED_URL, undefined, {
+        connection: { search_path: undefined },
+      }),
+    ).not.toThrow();
+    expect(() =>
+      resolveClientOptions(DIRECT_URL, undefined, {
+        connection: { search_path: "tenant_42", statement_timeout: 10_000 },
+      }),
+    ).not.toThrow();
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("is exported for direct use and reports every offending param", () => {
+    expect(() =>
+      assertPooledStartupParameters({ search_path: "a", default_transaction_read_only: "on" }),
+    ).toThrow(/search_path, default_transaction_read_only/);
   });
 });

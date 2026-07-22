@@ -31,6 +31,33 @@ type ClientOptions = Options<Record<string, PostgresType>>;
 /** The transaction-mode PgBouncer port on CapyDB hosts (`:5432` is direct). */
 const POOLED_PORT = "6432";
 
+/**
+ * Startup parameters PgBouncer tracks per client connection and replays on
+ * whichever backend it borrows - safe to send to the pooled endpoint.
+ */
+const POOLER_TRACKED_STARTUP_PARAMS: ReadonlySet<string> = new Set([
+  "client_encoding",
+  "datestyle",
+  "timezone",
+  "standard_conforming_strings",
+  "application_name",
+]);
+
+/**
+ * Startup parameters the CapyDB pooler ACCEPTS BUT NEVER APPLIES
+ * (`ignore_startup_parameters` on the per-cell PgBouncer). The connection
+ * succeeds, but the value is silently not in effect - the durable equivalent
+ * is `ALTER ROLE your_role SET <param> = ...` on the direct endpoint.
+ */
+const POOLER_IGNORED_STARTUP_PARAMS: ReadonlySet<string> = new Set([
+  "statement_timeout",
+  "idle_in_transaction_session_timeout",
+  "lock_timeout",
+  "idle_session_timeout",
+  "extra_float_digits",
+  "options",
+]);
+
 /** Env vars checked (in order) by {@link createDb} after `options.connectionString`. */
 const POOLED_ENV_VARS = ["CAPYDB_DATABASE_URL", "DATABASE_URL"] as const;
 
@@ -170,8 +197,63 @@ export function resolveClientOptions(
   overrides?: ClientOptions,
 ): ClientOptions {
   const usePooledDefaults = pooled ?? isPooledUrl(connectionString);
+  if (usePooledDefaults && overrides?.connection) {
+    assertPooledStartupParameters(overrides.connection);
+  }
   const defaults: ClientOptions = usePooledDefaults ? { prepare: false, max: 1 } : { max: 10 };
   return { ...defaults, ...overrides };
+}
+
+/**
+ * Validate postgres-js `connection: {...}` options against the pooled
+ * endpoint's startup-parameter rules.
+ *
+ * postgres-js sends every `connection` key as a wire-level startup parameter
+ * on each new connection. Behind transaction-mode PgBouncer three things can
+ * happen, and two of them deserve to be loud:
+ *
+ * - Tracked params (`application_name`, `client_encoding`, ...) are replayed
+ *   per client - fine, silently allowed.
+ * - Ignored params (`statement_timeout` and friends) connect successfully but
+ *   are NEVER APPLIED - a `console.warn` names each one and the durable fix
+ *   (`ALTER ROLE ... SET`), because a timeout you believe is set and isn't is
+ *   a production incident waiting for a slow query.
+ * - Anything else (e.g. `search_path`) is rejected by the pooler at handshake
+ *   with `unsupported startup parameter` (08P01), taking every connection
+ *   down with it - this throws at client construction instead, with the same
+ *   remediation, so a misconfigured deploy dies loudly at startup rather than
+ *   at first query.
+ *
+ * @param connection - the `connection` object passed in `options.client`.
+ * @throws Error naming every parameter the pooler would reject at handshake.
+ */
+export function assertPooledStartupParameters(connection: Record<string, unknown>): void {
+  const ignored: string[] = [];
+  const rejected: string[] = [];
+  for (const [key, value] of Object.entries(connection)) {
+    if (value === undefined || value === null) continue;
+    const name = key.toLowerCase();
+    if (POOLER_TRACKED_STARTUP_PARAMS.has(name)) continue;
+    (POOLER_IGNORED_STARTUP_PARAMS.has(name) ? ignored : rejected).push(key);
+  }
+  if (rejected.length > 0) {
+    throw new Error(
+      `@capydb/drizzle: connection option(s) ${rejected.join(", ")} would be sent as ` +
+        `startup parameters, which CapyDB's pooled (:6432) endpoint rejects at handshake ` +
+        `("unsupported startup parameter", 08P01) - every connection would fail. Set them ` +
+        `durably instead (ALTER ROLE your_role SET <param> = ... on the direct endpoint), ` +
+        `or use createDirectDb for a client that needs them per-connection.`,
+    );
+  }
+  if (ignored.length > 0) {
+    console.warn(
+      `@capydb/drizzle: connection option(s) ${ignored.join(", ")} are accepted by ` +
+        `CapyDB's pooled (:6432) endpoint but NOT applied - the value is silently ` +
+        `ignored under transaction pooling. Set them durably with ` +
+        `ALTER ROLE your_role SET <param> = ... (applies to pooled and direct connections), ` +
+        `then remove them from the client options.`,
+    );
+  }
 }
 
 /** Shared implementation for {@link createDb} and {@link createDirectDb}. */
