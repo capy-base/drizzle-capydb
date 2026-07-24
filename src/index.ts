@@ -18,8 +18,13 @@
  *   session-level state (advisory locks, `SET`, multi-statement migration
  *   transactions) that migration tools rely on.
  *
- * CapyDB connection strings already carry `sslmode=require`; postgres-js
- * honours it from the URL, so no extra TLS configuration is needed here.
+ * CapyDB connection strings carry `sslmode=verify-full` - the data plane is
+ * served from a publicly trusted wildcard certificate, so clients verify the
+ * chain AND the hostname rather than merely encrypting. postgres-js honours
+ * `sslmode` from the URL against Node's system trust store, so no extra TLS
+ * configuration is needed here. libpq-only TLS parameters (`sslrootcert` and
+ * friends, which psql users add) are stripped before postgres-js can forward
+ * them as startup parameters - see {@link stripLibpqTLSParams}.
  */
 import type { AnyRelations, DrizzleConfig, EmptyRelations } from "drizzle-orm";
 import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
@@ -56,6 +61,16 @@ const POOLER_IGNORED_STARTUP_PARAMS: ReadonlySet<string> = new Set([
   "idle_session_timeout",
   "extra_float_digits",
   "options",
+  // Client-side libpq TLS options. The pooler ignores them so that a URL
+  // carrying psql's sslrootcert=system cannot take every pooled connection
+  // down with 08P01. KEEP IN LOCKSTEP with ignore_startup_parameters in
+  // capydb-pool-sync.sh.j2.
+  "sslmode",
+  "sslrootcert",
+  "sslcert",
+  "sslkey",
+  "sslcrl",
+  "sslcompression",
 ]);
 
 /** Env vars checked (in order) by {@link createDb} after `options.connectionString`. */
@@ -270,9 +285,10 @@ function createFromSources<TRelations extends AnyRelations>(
         "DATABASE_DIRECT_URL to the :5432 connection before running migrations or DDL.",
     );
   }
+  const sanitized = stripLibpqTLSParams(connectionString);
   const client = postgres(
-    connectionString,
-    resolveClientOptions(connectionString, options.pooled, options.client),
+    sanitized,
+    resolveClientOptions(sanitized, options.pooled, options.client),
   );
   return drizzle<TRelations>({
     client,
@@ -365,4 +381,170 @@ export function createDirectDb<TRelations extends AnyRelations = EmptyRelations>
   options: CapyDBDrizzleOptions<TRelations> = {},
 ): PostgresJsDatabase<TRelations> & { $client: Sql } {
   return createFromSources(options, DIRECT_ENV_VARS, true);
+}
+
+/**
+ * Error codes and socket errnos that mean "this cell is paused, resuming, or
+ * was just paused underneath us" rather than "your query is wrong".
+ *
+ * Scale-to-zero makes these normal rather than exceptional: the idle sweep can
+ * pause a cell between two requests, so a connection that was healthy a minute
+ * ago is gone. Note that a *new* connection to a paused cell does NOT land
+ * here - the routing layer holds it, drives a single-flight wake, and relays
+ * once the cell is up, so the client only observes a slower connect.
+ */
+const WAKE_TRANSIENT_CODES = new Set([
+  "57P01", // admin_shutdown - the cell was paused mid-session
+  "57P03", // cannot_connect_now - still resuming
+  "08006", // connection_failure
+  "08001", // sqlclient_unable_to_establish_sqlconnection
+  "08000", // connection_exception
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ETIMEDOUT",
+  "EPIPE",
+  "CONNECT_TIMEOUT",
+]);
+
+/**
+ * Report whether an error is a transient pause/resume condition that is worth
+ * retrying, as opposed to a real failure.
+ *
+ * Exported so callers can build their own retry policy: this package
+ * deliberately does not wrap query execution, because retrying an arbitrary
+ * statement is only safe when the caller knows it is idempotent.
+ *
+ * @example
+ * ```ts
+ * try { await db.select().from(users) }
+ * catch (error) {
+ *   if (isCellWakingError(error)) { /* safe to retry a read *\/ }
+ *   throw error
+ * }
+ * ```
+ */
+export function isCellWakingError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const code = (error as { code?: unknown }).code;
+  if (typeof code === "string" && WAKE_TRANSIENT_CODES.has(code)) return true;
+  const cause = (error as { cause?: unknown }).cause;
+  return cause !== undefined && cause !== error ? isCellWakingError(cause) : false;
+}
+
+/** Options for {@link waitForWake}. */
+export interface WaitForWakeOptions {
+  /** Maximum attempts before giving up. Default 10. */
+  attempts?: number;
+  /** Initial backoff in milliseconds; doubles per attempt. Default 250. */
+  baseDelayMs?: number;
+  /** Upper bound on a single backoff interval. Default 5000. */
+  maxDelayMs?: number;
+  /** Abort the wait early (e.g. a CI job timeout). */
+  signal?: AbortSignal;
+}
+
+/**
+ * Block until the cell answers a trivial query, retrying transient
+ * pause/resume errors with exponential backoff.
+ *
+ * When you need this: batch jobs, cron, CI steps and migrations that are the
+ * FIRST thing to touch a cell that has been paused. The routing layer already
+ * holds and wakes a normal connection, so application traffic does not need
+ * this - it is for callers that want a bounded, explicit warm-up before doing
+ * something expensive, instead of discovering the cell was cold halfway
+ * through a migration.
+ *
+ * Non-transient errors (bad credentials, a real SQL error) are rethrown
+ * immediately rather than retried.
+ *
+ * @example
+ * ```ts
+ * const db = createDirectDb()
+ * await waitForWake(db.$client)          // bounded warm-up
+ * await migrate(db, { migrationsFolder: './drizzle' })
+ * ```
+ */
+export async function waitForWake(client: Sql, options: WaitForWakeOptions = {}): Promise<void> {
+  const attempts = options.attempts ?? 10;
+  const baseDelayMs = options.baseDelayMs ?? 250;
+  const maxDelayMs = options.maxDelayMs ?? 5000;
+
+  let lastError: unknown;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    options.signal?.throwIfAborted();
+    try {
+      await client`select 1`;
+      return;
+    } catch (error) {
+      if (!isCellWakingError(error)) throw error;
+      lastError = error;
+      if (attempt === attempts - 1) break;
+      const delay = Math.min(baseDelayMs * 2 ** attempt, maxDelayMs);
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+  throw new Error(
+    `cell did not become ready after ${attempts} attempts: ${
+      lastError instanceof Error ? lastError.message : String(lastError)
+    }`,
+  );
+}
+
+/**
+ * libpq connection parameters that configure TLS on the CLIENT and have no
+ * meaning to a Postgres server.
+ *
+ * libpq consumes these locally and never puts them on the wire. postgres-js
+ * does not recognise them, and its rule for unrecognised URL query parameters
+ * is to forward them as wire startup parameters - so a connection string
+ * copied out of a psql invocation (`...?sslmode=verify-full&sslrootcert=system`)
+ * turns into a startup packet the server never asked for. On the pooled
+ * endpoint that is an 08P01 handshake rejection; on the direct endpoint
+ * Postgres itself fails the connection with `unrecognized configuration
+ * parameter`. Either way every connection dies, which is exactly the failure
+ * shape of the 2026-07-22 pooler incident.
+ *
+ * `sslmode` is deliberately NOT in this list: postgres-js understands it and
+ * maps it onto its own TLS behaviour, so it must survive.
+ */
+const LIBPQ_CLIENT_TLS_PARAMS: ReadonlySet<string> = new Set([
+  "sslrootcert",
+  "sslcert",
+  "sslkey",
+  "sslcrl",
+  "sslcompression",
+  "sslsni",
+  "channel_binding",
+]);
+
+/**
+ * Remove libpq-only TLS parameters from a connection string.
+ *
+ * This is connection policy, not query behaviour: it makes one connection
+ * string usable by psql and by postgres-js, which is the whole point of
+ * handing users a single URL. Anything postgres-js genuinely understands
+ * (including `sslmode`) is preserved untouched.
+ *
+ * Exported for tools that need the same normalisation without building a client.
+ */
+export function stripLibpqTLSParams(connectionString: string): string {
+  if (!connectionString.includes("?")) return connectionString;
+  let parsed: URL;
+  try {
+    parsed = new URL(connectionString);
+  } catch {
+    // Not URL-parseable (some libpq keyword/value forms are not); leave it be
+    // rather than risk corrupting a string we do not fully understand.
+    return connectionString;
+  }
+  // Snapshot the names first: deleting from a live URLSearchParams while
+  // iterating it skips entries, so collecting the matches before mutating is
+  // load-bearing, not stylistic.
+  const doomed: string[] = [];
+  parsed.searchParams.forEach((_value, key) => {
+    if (LIBPQ_CLIENT_TLS_PARAMS.has(key.toLowerCase())) doomed.push(key);
+  });
+  for (const key of doomed) parsed.searchParams.delete(key);
+  const changed = doomed.length > 0;
+  return changed ? parsed.toString() : connectionString;
 }
