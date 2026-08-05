@@ -145,6 +145,42 @@ export default defineConfig({
 })
 ```
 
+## Row-level security context
+
+If your database uses RLS with the vanilla GUC convention (what
+`capydb migrate rls` emits when converting Supabase policies), set the
+per-request context with `withAuthContext` — it opens a transaction, applies
+the context transaction-locally, and runs your callback inside it:
+
+```ts
+import { withAuthContext } from '@capydb/drizzle'
+
+const todos = await withAuthContext(db, { userId: session.userId }, (tx) =>
+  tx.select().from(schema.todos)
+)
+```
+
+Why a transaction: `set_config(..., true)` is `SET LOCAL` semantics, which is
+the only pooler-safe shape — on the `:6432` endpoint, transaction-mode
+PgBouncer may run each statement of a session on a different backend, so a
+session-level `SET` would leak one user's identity into another request's
+connection. Always query through the `tx` handle inside the callback; `db`
+queries run outside the context.
+
+Promoted JWT claims and the claims blob ride along the same way:
+
+```ts
+await withAuthContext(
+  db,
+  { userId, set: { 'app.org_id': orgId }, claims: rawJwtClaims },
+  (tx) => tx.select().from(schema.documents)
+)
+```
+
+For databases converted with `--mode supabase-compat`, use
+`withSupabaseJwtClaims(db, claims, callback)` — it sets the whole (verified!)
+claims object as `request.jwt.claims` for the `auth.uid()` shim to read.
+
 ## API
 
 - `createDb<TRelations>(options?)` — pooled-aware application client. Returns
@@ -155,6 +191,14 @@ export default defineConfig({
   (drizzle v1 dropped the driver-level `schema`/`casing` options: tables are
   used directly in queries, `db.query.*` comes from `relations`, and casing is
   configured at table level with drizzle's casing helpers.)
+- `withAuthContext(db, context, callback)` — runs the callback in a
+  transaction with the RLS context applied transaction-locally
+  (`app.user_id`, `app.role`, `app.email`, `app.claims`, plus custom GUCs via
+  `set`). Pooler-safe by construction.
+- `withSupabaseJwtClaims(db, claims, callback)` — same, but sets
+  `request.jwt.claims` for databases using the supabase-compat shim.
+- `AuthContext` / `AuthContextTransaction<TRelations>` — the context shape and
+  the transaction handle type passed to the callbacks.
 - `resolveConnectionString(explicit, envVarNames, env?)`,
   `resolveClientOptions(connectionString, pooled, overrides?)`,
   `isPooledUrl(connectionString)` — the pure resolution helpers, exported for

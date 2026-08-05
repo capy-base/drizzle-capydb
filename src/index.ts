@@ -26,7 +26,7 @@
  * friends, which psql users add) are stripped before postgres-js can forward
  * them as startup parameters - see {@link stripLibpqTLSParams}.
  */
-import type { AnyRelations, DrizzleConfig, EmptyRelations } from "drizzle-orm";
+import { sql, type AnyRelations, type DrizzleConfig, type EmptyRelations } from "drizzle-orm";
 import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import postgres, { type Options, type PostgresType, type Sql } from "postgres";
 
@@ -547,4 +547,130 @@ export function stripLibpqTLSParams(connectionString: string): string {
   for (const key of doomed) parsed.searchParams.delete(key);
   const changed = doomed.length > 0;
   return changed ? parsed.toString() : connectionString;
+}
+
+/**
+ * Session context for row-level security, set as transaction-local GUCs.
+ *
+ * This is the application half of the vanilla RLS convention that
+ * `capydb migrate rls` (and the standalone capyrls converter) emits: policies
+ * read `app.user_id` / `app.role` / promoted claims through small accessor
+ * functions, and the application states those facts per transaction. Unset
+ * values read as NULL inside policies, so leaving a field out fails closed.
+ */
+export interface AuthContext {
+  /** Sets `app.user_id` - what `auth.uid()` used to return on Supabase. */
+  userId?: string;
+  /** Sets `app.role`. `"service"` activates the converter's service escape. */
+  role?: string;
+  /** Sets `app.email`. */
+  email?: string;
+  /**
+   * Sets `app.claims` (serialized to JSON) for policies that read deep claim
+   * paths the converter could not promote to dedicated GUCs.
+   */
+  claims?: Record<string, unknown>;
+  /**
+   * Additional GUCs for promoted claims, e.g. `{ "app.org_id": orgId }`.
+   * Names must be dotted (`namespace.key`); Postgres reserves undotted names.
+   */
+  set?: Record<string, string>;
+}
+
+type TransactionCallback<TRelations extends AnyRelations> = Parameters<
+  PostgresJsDatabase<TRelations>["transaction"]
+>[0];
+
+/** The drizzle transaction handle passed to {@link withAuthContext}'s callback. */
+export type AuthContextTransaction<TRelations extends AnyRelations = EmptyRelations> = Parameters<
+  TransactionCallback<TRelations>
+>[0];
+
+/** Custom GUCs need a dotted name; Postgres rejects undotted custom settings. */
+const CUSTOM_GUC_NAME = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+$/;
+
+function authContextSettings(context: AuthContext): Array<[string, string]> {
+  const settings: Array<[string, string]> = [];
+  if (context.userId !== undefined) settings.push(["app.user_id", context.userId]);
+  if (context.role !== undefined) settings.push(["app.role", context.role]);
+  if (context.email !== undefined) settings.push(["app.email", context.email]);
+  if (context.claims !== undefined) settings.push(["app.claims", JSON.stringify(context.claims)]);
+  if (context.set) {
+    for (const [name, value] of Object.entries(context.set)) {
+      if (!CUSTOM_GUC_NAME.test(name)) {
+        throw new Error(
+          `@capydb/drizzle: invalid GUC name ${JSON.stringify(name)} in AuthContext.set - ` +
+            `custom settings need a dotted name like "app.org_id"`,
+        );
+      }
+      settings.push([name, value]);
+    }
+  }
+  return settings;
+}
+
+async function runWithTransactionLocalSettings<TRelations extends AnyRelations, T>(
+  db: Pick<PostgresJsDatabase<TRelations>, "transaction">,
+  settings: Array<[string, string]>,
+  callback: (tx: AuthContextTransaction<TRelations>) => Promise<T>,
+): Promise<T> {
+  return db.transaction(async (tx) => {
+    if (settings.length > 0) {
+      const assignments = settings.map(
+        ([name, value]) => sql`set_config(${name}, ${value}, true)`,
+      );
+      await tx.execute(sql`select ${sql.join(assignments, sql`, `)}`);
+    }
+    return callback(tx);
+  });
+}
+
+/**
+ * Run queries under a row-level-security context, pooler-safely.
+ *
+ * Opens a transaction, applies the context with `set_config(..., true)` -
+ * transaction-local, i.e. `SET LOCAL` semantics - and runs the callback
+ * inside that same transaction. This shape is load-bearing on CapyDB's
+ * pooled endpoint (`:6432`): transaction-mode PgBouncer may hand each
+ * statement of a session to a different backend, so a session-level `SET`
+ * would leak your user's identity into some OTHER request's connection.
+ * Transaction-local settings cannot outlive the transaction, on any backend.
+ *
+ * Queries made with `db` (not `tx`) inside the callback run OUTSIDE the
+ * context - always use the transaction handle you are given.
+ *
+ * @example
+ * const todos = await withAuthContext(db, { userId: session.userId }, (tx) =>
+ *   tx.select().from(schema.todos)
+ * )
+ *
+ * @throws When a custom GUC name in `context.set` is not dotted.
+ */
+export async function withAuthContext<TRelations extends AnyRelations, T>(
+  db: Pick<PostgresJsDatabase<TRelations>, "transaction">,
+  context: AuthContext,
+  callback: (tx: AuthContextTransaction<TRelations>) => Promise<T>,
+): Promise<T> {
+  return runWithTransactionLocalSettings(db, authContextSettings(context), callback);
+}
+
+/**
+ * Like {@link withAuthContext}, but for databases converted with
+ * `capydb migrate rls --mode supabase-compat`: sets the whole claims object
+ * as `request.jwt.claims`, which the compat `auth.uid()`/`auth.jwt()` shim
+ * reads. Include at least `sub` (and `role` where policies check it).
+ *
+ * The claims are trusted as given - verify the JWT before calling this;
+ * nothing inside the database checks signatures anymore.
+ */
+export async function withSupabaseJwtClaims<TRelations extends AnyRelations, T>(
+  db: Pick<PostgresJsDatabase<TRelations>, "transaction">,
+  claims: Record<string, unknown>,
+  callback: (tx: AuthContextTransaction<TRelations>) => Promise<T>,
+): Promise<T> {
+  return runWithTransactionLocalSettings(
+    db,
+    [["request.jwt.claims", JSON.stringify(claims)]],
+    callback,
+  );
 }
