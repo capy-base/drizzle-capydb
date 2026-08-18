@@ -2,7 +2,7 @@
 
 Drizzle ORM helpers for [CapyDB](https://capydb.dev). A thin, typed layer over
 `drizzle-orm/postgres-js` + `postgres` that bakes in the connection rules a
-CapyDB cell expects — so the pooled endpoint, serverless pool sizing, and the
+CapyDB cell expects - so the pooled endpoint, serverless pool sizing, and the
 migrations-need-the-direct-url rule are handled for you instead of learned the
 hard way.
 
@@ -57,7 +57,7 @@ const usersWithPosts = await db.query.users.findMany({ with: { posts: true } })
 `options.connectionString`, `CAPYDB_DATABASE_URL`, `DATABASE_URL`. It throws a
 descriptive error at startup if none is set.
 
-## Pooled vs direct — why two URLs
+## Pooled vs direct - why two URLs
 
 Every CapyDB cell exposes two endpoints on `*.db.capydb.dev`:
 
@@ -66,7 +66,7 @@ Every CapyDB cell exposes two endpoints on `*.db.capydb.dev`:
 | `:6432` | Transaction-mode PgBouncer (pooled) | `DATABASE_URL` | Application queries, serverless |
 | `:5432` | Direct Postgres connection | `DATABASE_DIRECT_URL` | Migrations, DDL, admin scripts |
 
-Transaction-mode pooling means **each transaction** — not each session — is
+Transaction-mode pooling means **each transaction** - not each session - is
 assigned to whichever backend connection is free. Two things follow:
 
 1. **Server-side prepared statements break.** A statement prepared on one
@@ -74,7 +74,7 @@ assigned to whichever backend connection is free. Two things follow:
    intermittent `prepared statement "..." does not exist` errors under load.
    postgres-js must run with `prepare: false` against `:6432`.
 2. **Session state doesn't stick.** Advisory locks, `SET`, and long
-   multi-statement transactions — exactly what migration tools rely on — are
+   multi-statement transactions - exactly what migration tools rely on - are
    not safe through the pooler. **DDL and migrations must use the direct URL.**
 
 `createDb()` detects `:6432` (or `pooled: true`) and defaults the client to
@@ -92,13 +92,13 @@ picks TLS up from the URL, so nothing extra is needed.
 
 In serverless runtimes (Vercel, Lambda, Workers with TCP), every
 concurrently-warm function instance holds its own connection pool. Keep each
-one tiny — the default `max: 1` (or at most `2`) is deliberate. The pooler's
+one tiny - the default `max: 1` (or at most `2`) is deliberate. The pooler's
 whole job is to multiplex many small client pools onto a few real backend
 connections; a large per-instance `max` just exhausts pooler slots. Create the
 client once at module scope so warm invocations reuse it:
 
 ```ts
-// db.ts — module scope, reused across invocations
+// db.ts - module scope, reused across invocations
 import { createDb } from '@capydb/drizzle'
 
 export const db = createDb()
@@ -149,7 +149,7 @@ export default defineConfig({
 
 If your database uses RLS with the vanilla GUC convention (what
 `capydb migrate rls` emits when converting Supabase policies), set the
-per-request context with `withAuthContext` — it opens a transaction, applies
+per-request context with `withAuthContext` - it opens a transaction, applies
 the context transaction-locally, and runs your callback inside it:
 
 ```ts
@@ -161,7 +161,7 @@ const todos = await withAuthContext(db, { userId: session.userId }, (tx) =>
 ```
 
 Why a transaction: `set_config(..., true)` is `SET LOCAL` semantics, which is
-the only pooler-safe shape — on the `:6432` endpoint, transaction-mode
+the only pooler-safe shape - on the `:6432` endpoint, transaction-mode
 PgBouncer may run each statement of a session on a different backend, so a
 session-level `SET` would leak one user's identity into another request's
 connection. Always query through the `tx` handle inside the callback; `db`
@@ -178,34 +178,34 @@ await withAuthContext(
 ```
 
 For databases converted with `--mode supabase-compat`, use
-`withSupabaseJwtClaims(db, claims, callback)` — it sets the whole (verified!)
+`withSupabaseJwtClaims(db, claims, callback)` - it sets the whole (verified!)
 claims object as `request.jwt.claims` for the `auth.uid()` shim to read.
 
 ## API
 
-- `createDb<TRelations>(options?)` — pooled-aware application client. Returns
+- `createDb<TRelations>(options?)` - pooled-aware application client. Returns
   `PostgresJsDatabase<TRelations> & { $client: Sql }`.
-- `createDirectDb<TRelations>(options?)` — direct-connection client for
+- `createDirectDb<TRelations>(options?)` - direct-connection client for
   migrations/DDL. Same return type.
-- `CapyDBDrizzleOptions<TRelations>` — `{ connectionString?, pooled?, client?, relations?, logger?, jit? }`.
+- `CapyDBDrizzleOptions<TRelations>` - `{ connectionString?, pooled?, client?, relations?, logger?, jit? }`.
   (drizzle v1 dropped the driver-level `schema`/`casing` options: tables are
   used directly in queries, `db.query.*` comes from `relations`, and casing is
   configured at table level with drizzle's casing helpers.)
-- `withAuthContext(db, context, callback)` — runs the callback in a
+- `withAuthContext(db, context, callback)` - runs the callback in a
   transaction with the RLS context applied transaction-locally
   (`app.user_id`, `app.role`, `app.email`, `app.claims`, plus custom GUCs via
   `set`). Pooler-safe by construction.
-- `withSupabaseJwtClaims(db, claims, callback)` — same, but sets
+- `withSupabaseJwtClaims(db, claims, callback)` - same, but sets
   `request.jwt.claims` for databases using the supabase-compat shim.
-- `AuthContext` / `AuthContextTransaction<TRelations>` — the context shape and
+- `AuthContext` / `AuthContextTransaction<TRelations>` - the context shape and
   the transaction handle type passed to the callbacks.
 - `resolveConnectionString(explicit, envVarNames, env?)`,
   `resolveClientOptions(connectionString, pooled, overrides?)`,
-  `isPooledUrl(connectionString)` — the pure resolution helpers, exported for
+  `isPooledUrl(connectionString)` - the pure resolution helpers, exported for
   testing and tooling.
 
 Everything else (query builders, `sql`, migrator, …) comes from `drizzle-orm`
-directly — this package deliberately re-exports nothing from it.
+directly - this package deliberately re-exports nothing from it.
 
 ## Development
 
