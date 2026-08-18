@@ -5,6 +5,20 @@ All notable changes to `@capydb/drizzle` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-08-18
+
+### Added
+
+- `createDb` and `createDirectDb` factories for pooled and direct CapyDB connections, with pooler-safe defaults (`prepare: false` on the pooled `:6432` endpoint), plus connection string resolution from environment variables or explicit options via `resolveConnectionString`, `isPooledUrl`, and `resolveClientOptions` ([01d230d](https://github.com/capy-base/drizzle-capydb/commit/01d230d))
+- Startup parameter validation for pooled connections: `assertPooledStartupParameters` checks postgres-js `connection` options against the pooled endpoint's rules — tracked parameters pass through, ignored ones warn, and unsupported ones (e.g. `search_path`) throw at startup instead of failing on every connection; `resolveClientOptions` runs this check automatically when targeting a pooled connection ([8b0014e](https://github.com/capy-base/drizzle-capydb/commit/8b0014e))
+- `waitForWake` and `isCellWakingError` for handling scale-to-zero: detect transient pause/resume errors and block with exponential backoff until the database cell is ready ([9cde845](https://github.com/capy-base/drizzle-capydb/commit/9cde845))
+- `stripLibpqTLSParams` to remove libpq-only TLS query parameters (e.g. `sslrootcert`, `sslcert`) from connection strings that postgres-js would otherwise forward as unsupported wire parameters ([9cde845](https://github.com/capy-base/drizzle-capydb/commit/9cde845))
+- Row-level security context helpers: `withAuthContext` runs queries in a transaction with transaction-local `app.user_id`/`app.role`/`app.email`/`app.claims` settings (plus custom GUCs), and `withSupabaseJwtClaims` sets verified claims as `request.jwt.claims` for Supabase-compat databases; includes the `AuthContext` interface and `AuthContextTransaction` type ([5dfced0](https://github.com/capy-base/drizzle-capydb/commit/5dfced0))
+### Changed
+
+- `createDirectDb` now rejects pooled connection strings, enforcing a direct connection for migrations ([1aab8e9](https://github.com/capy-base/drizzle-capydb/commit/1aab8e9))
+- Connection string handling sanitizes libpq-only TLS parameters automatically for postgres-js compatibility ([9cde845](https://github.com/capy-base/drizzle-capydb/commit/9cde845))
+
 ## [1.4.0] - 2026-08-03
 
 ### Added
